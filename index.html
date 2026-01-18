@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Microphone Test</title>
+
+<style>
+:root[data-theme="light"] {
+  --bg:#ffffff; --text:#000000; --panel:#eeeeee; --accent:#2196f3;
+}
+:root[data-theme="dark"] {
+  --bg:#0f0f0f; --text:#ffffff; --panel:#1a1a1a; --accent:#4da3ff;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: system-ui, Arial;
+  max-width: 520px;
+  margin: 40px auto;
+  padding: 10px;
+  text-align: center;
+}
+
+button, select {
+  padding: 10px;
+  width: 100%;
+  margin: 8px 0;
+  font-size: 16px;
+}
+
+#themeToggle {
+  position: fixed;
+  top: 10px;
+  right: 10px;
+  width: auto !important;
+  padding: 6px 10px;
+  font-size: 14px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+#wave {
+  width: 100%;
+  height: 90px;
+  background: var(--panel);
+  border-radius: 12px;
+  margin-top: 15px;
+}
+
+#progressOuter {
+  background: var(--panel);
+  height: 20px;
+  border-radius: 10px;
+  overflow: hidden;
+  margin-top: 10px;
+}
+
+#progressBar {
+  height: 100%;
+  width: 0%;
+  background: var(--accent);
+}
+
+#audioPlayback {
+  margin-top: 20px;
+  width: 100%;
+}
+
+#quality {
+  font-weight: bold;
+  margin-top: 10px;
+}
+</style>
+</head>
+<body>
+
+<button id="themeToggle">🌙</button>
+
+<h2>Microphone Test</h2>
+
+<select id="micSelect">
+  <option>Click Start to load microphones</option>
+</select>
+
+<button id="startBtn">Start Mic Test</button>
+<button id="stopBtn" disabled>Stop Mic</button>
+
+<canvas id="wave"></canvas>
+
+<div id="progressOuter"><div id="progressBar"></div></div>
+<div id="progressText">0%</div>
+
+<audio id="audioPlayback" controls hidden></audio>
+
+<div id="quality"></div>
+<p id="status">Idle.</p>
+
+<script>
+/* ===================== THEME ===================== */
+const themeBtn = document.getElementById("themeToggle");
+function setTheme(t){
+  document.documentElement.setAttribute("data-theme", t);
+  localStorage.setItem("theme", t);
+  themeBtn.textContent = t === "dark" ? "☀️" : "🌙";
+}
+themeBtn.onclick = () => setTheme(
+  document.documentElement.getAttribute("data-theme") === "dark" ? "light" : "dark"
+);
+setTheme(localStorage.getItem("theme") || "light");
+
+/* ===================== ELEMENTS ===================== */
+const micSelect = document.getElementById("micSelect");
+const startBtn = document.getElementById("startBtn");
+const stopBtn = document.getElementById("stopBtn");
+const statusEl = document.getElementById("status");
+const qualityEl = document.getElementById("quality");
+const audioPlayback = document.getElementById("audioPlayback");
+const progressBar = document.getElementById("progressBar");
+const progressText = document.getElementById("progressText");
+
+const canvas = document.getElementById("wave");
+const ctx = canvas.getContext("2d");
+canvas.width = canvas.offsetWidth;
+canvas.height = canvas.offsetHeight;
+
+let audioCtx, analyser, dataArray, micStream, recorder, chunks=[];
+let rmsHistory=[];
+let currentDeviceId = null;
+
+/* ===================== LOAD DEVICES ===================== */
+async function loadDevices() {
+  const devices = await navigator.mediaDevices.enumerateDevices();
+  const mics = devices.filter(d => d.kind === "audioinput");
+
+  micSelect.innerHTML = "";
+
+  if (mics.length === 0) {
+    const opt = document.createElement("option");
+    opt.textContent = "No microphones found";
+    micSelect.appendChild(opt);
+    return;
+  }
+
+  mics.forEach((mic, i) => {
+    const opt = document.createElement("option");
+    opt.value = mic.deviceId;
+    opt.textContent = mic.label || `Microphone ${i+1}`;
+    micSelect.appendChild(opt);
+  });
+
+  if (!currentDeviceId) {
+    currentDeviceId = micSelect.value;
+  }
+}
+
+/* ===================== WAVEFORM ===================== */
+function draw(){
+  analyser.getByteTimeDomainData(dataArray);
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  ctx.strokeStyle="#4da3ff";
+  ctx.beginPath();
+
+  let x=0, slice=canvas.width/dataArray.length;
+  let energy=0;
+
+  for(let i=0;i<dataArray.length;i++){
+    const v=(dataArray[i]-128)/128;
+    const boosted=Math.sign(v)*Math.pow(Math.abs(v),0.45);
+    const y=canvas.height/2 + boosted*canvas.height*0.4;
+
+    if(i===0) ctx.moveTo(x,y);
+    else ctx.lineTo(x,y);
+
+    x+=slice;
+    energy+=v*v;
+  }
+
+  rmsHistory.push(Math.sqrt(energy/dataArray.length));
+  ctx.stroke();
+  requestAnimationFrame(draw);
+}
+
+/* ===================== QUALITY SCORE ===================== */
+function micQuality() {
+  if (rmsHistory.length < 20) return 0;
+
+  const avg = rmsHistory.reduce((a,b)=>a+b,0)/rmsHistory.length;
+  const variance = rmsHistory.map(x=>(x-avg)**2).reduce((a,b)=>a+b,0)/rmsHistory.length;
+
+  const loudnessScore = Math.min(1, avg / 0.06);
+  const clarityScore = Math.max(0, 1 - variance * 120);
+
+  let score = (loudnessScore * 70 + clarityScore * 30) * 100;
+  return Math.round(Math.min(100, Math.max(1, score)));
+}
+
+/* ===================== START MIC ===================== */
+startBtn.onclick = async () => {
+  try {
+    rmsHistory = [];
+    chunks = [];
+    audioPlayback.hidden = true;
+    qualityEl.textContent = "";
+    statusEl.textContent = "Requesting mic...";
+
+    micStream = await navigator.mediaDevices.getUserMedia({
+      audio: currentDeviceId ? { deviceId: { exact: currentDeviceId } } : true
+    });
+
+    await loadDevices();
+    stopBtn.disabled = false;
+
+    audioCtx = new AudioContext();
+    const source = audioCtx.createMediaStreamSource(micStream);
+    analyser = audioCtx.createAnalyser();
+    analyser.fftSize = 1024;
+    dataArray = new Uint8Array(analyser.fftSize);
+    source.connect(analyser);
+
+    draw();
+
+    recorder = new MediaRecorder(micStream);
+    recorder.ondataavailable = e => chunks.push(e.data);
+
+    recorder.onstop = () => {
+      const blob = new Blob(chunks, { type: recorder.mimeType });
+      audioPlayback.src = URL.createObjectURL(blob);
+      audioPlayback.hidden = false;
+      qualityEl.textContent = "Mic quality score: " + micQuality() + "/100";
+      statusEl.textContent = "Finished. Mic active.";
+    };
+
+    recorder.start();
+    const start = performance.now();
+
+    (function prog(){
+      const p = Math.min((performance.now()-start)/30000*100,100);
+      progressBar.style.width = p + "%";
+      progressText.textContent = Math.floor(p) + "%";
+      if(p<100) requestAnimationFrame(prog);
+    })();
+
+    setTimeout(()=>recorder.stop(),30200);
+
+  } catch (e) {
+    console.error(e);
+    statusEl.textContent = "Microphone blocked or unavailable.";
+  }
+};
+
+/* ===================== STOP MIC ===================== */
+stopBtn.onclick = () => {
+  if(micStream){
+    micStream.getTracks().forEach(t => t.stop());
+    stopBtn.disabled = true;
+    statusEl.textContent = "Microphone stopped.";
+  }
+};
+
+/* ===================== CHANGE MIC ===================== */
+micSelect.onchange = (e) => {
+  currentDeviceId = e.target.value;
+  statusEl.textContent = "Microphone changed. Click Start again.";
+};
+</script>
+</body>
+</html>
